@@ -4,7 +4,8 @@
   "description": "Simple working JWT login demo",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node --env-file-if-exists=.env.local server.js",
+    "dev": "node --watch --env-file-if-exists=.env.local server.js"
   },
   "dependencies": {
     "express": "^4.19.2",

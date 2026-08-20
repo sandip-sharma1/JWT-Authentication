@@ -1,3 +1,7 @@
 node_modules
 .DS_Store
 data.json
+
+# real secrets
+.env
+.env.local
