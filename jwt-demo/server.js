@@ -1,30 +1,29 @@
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const path = require("path");
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-const SECRET_KEY = process.env.SECRET_KEY || "dev_secret_change_me"; // set SECRET_KEY in real apps
+// Two different secrets: a leaked access secret must not let anyone mint refresh tokens.
+const ACCESS_SECRET = process.env.ACCESS_SECRET || "dev_access_secret_change_me";
+const REFRESH_SECRET = process.env.REFRESH_SECRET || "dev_refresh_secret_change_me";
+
+// Short access token, long refresh token. That trade-off is the whole point:
+// the access token is sent on every request (more exposure) so it must expire fast;
+// the refresh token is sent only to /refresh (less exposure) so it can live longer.
+const ACCESS_TTL = "2m";
+const REFRESH_TTL = "7d";
 
 // --- Fake "database" of users ---
 // Password for all seeded users is: "password123"
 let nextUserId = 3;
 const users = [
-  {
-    id: 1,
-    username: "testuser",
-    role: "user",
-    passwordHash: bcrypt.hashSync("password123", 8),
-  },
-  {
-    id: 2,
-    username: "admin",
-    role: "admin",
-    passwordHash: bcrypt.hashSync("password123", 8),
-  },
+  { id: 1, username: "testuser", role: "user", passwordHash: bcrypt.hashSync("password123", 8) },
+  { id: 2, username: "admin", role: "admin", passwordHash: bcrypt.hashSync("password123", 8) },
 ];
 
 // --- Fake "database" of notes, each owned by one user ---
@@ -34,7 +33,33 @@ const notes = [
   { id: 2, userId: 2, text: "admin's private note" },
 ];
 
-// --- REGISTER route: creates a new user, so you can log in as several people ---
+// --- Refresh token store ---
+// Access tokens are stateless (that's why they can't be revoked), but refresh
+// tokens ARE tracked here, which is what makes real logout and revocation possible.
+const refreshTokens = new Map(); // jti -> { userId, used, family }
+
+function issueTokens(user, family = crypto.randomUUID()) {
+  const accessToken = jwt.sign(
+    { userId: user.id, username: user.username, role: user.role },
+    ACCESS_SECRET,
+    { expiresIn: ACCESS_TTL }
+  );
+
+  // jti = a unique id for this token, so we can look it up and revoke it later.
+  const jti = crypto.randomUUID();
+  const refreshToken = jwt.sign({ userId: user.id, jti, family }, REFRESH_SECRET, {
+    expiresIn: REFRESH_TTL,
+  });
+  refreshTokens.set(jti, { userId: user.id, used: false, family });
+
+  return { accessToken, refreshToken };
+}
+
+function publicUser(user) {
+  return { id: user.id, username: user.username, role: user.role };
+}
+
+// --- REGISTER ---
 app.post("/register", (req, res) => {
   const { username, password } = req.body;
 
@@ -56,10 +81,10 @@ app.post("/register", (req, res) => {
   };
   users.push(user);
 
-  res.status(201).json({ token: signToken(user) });
+  res.status(201).json({ ...issueTokens(user), user: publicUser(user) });
 });
 
-// --- LOGIN route: checks credentials, returns a real JWT ---
+// --- LOGIN ---
 app.post("/login", (req, res) => {
   const { username, password } = req.body;
 
@@ -73,19 +98,67 @@ app.post("/login", (req, res) => {
     return res.status(401).json({ error: "Invalid username or password" });
   }
 
-  res.json({ token: signToken(user) });
+  res.json({ ...issueTokens(user), user: publicUser(user) });
 });
 
-// The token carries who you are AND what you're allowed to do (role).
-function signToken(user) {
-  return jwt.sign(
-    { userId: user.id, username: user.username, role: user.role },
-    SECRET_KEY,
-    { expiresIn: "1h" }
-  );
-}
+// --- REFRESH: trade a valid refresh token for a fresh pair ---
+app.post("/refresh", (req, res) => {
+  const { refreshToken } = req.body;
+  if (!refreshToken) {
+    return res.status(401).json({ error: "No refresh token provided" });
+  }
 
-// --- Middleware: verifies the JWT sent in the Authorization header ---
+  let payload;
+  try {
+    payload = jwt.verify(refreshToken, REFRESH_SECRET);
+  } catch {
+    return res.status(403).json({ error: "Invalid or expired refresh token" });
+  }
+
+  const stored = refreshTokens.get(payload.jti);
+  if (!stored) {
+    return res.status(403).json({ error: "Refresh token has been revoked" });
+  }
+
+  // Reuse detection: a rotated token should never come back. If it does, the
+  // token was probably stolen, so we kill every token in that family at once.
+  if (stored.used) {
+    for (const [jti, entry] of refreshTokens) {
+      if (entry.family === stored.family) refreshTokens.delete(jti);
+    }
+    return res.status(403).json({ error: "Refresh token reuse detected — all sessions revoked" });
+  }
+
+  // Rotation: each refresh burns the old token and issues a new one.
+  stored.used = true;
+
+  const user = users.find((u) => u.id === payload.userId);
+  if (!user) {
+    return res.status(403).json({ error: "User no longer exists" });
+  }
+
+  res.json({ ...issueTokens(user, stored.family), user: publicUser(user) });
+});
+
+// --- LOGOUT: revoke the refresh token server-side ---
+// The access token stays valid until it expires — that is the documented
+// trade-off of stateless tokens, and why access tokens are kept short.
+app.post("/logout", (req, res) => {
+  const { refreshToken } = req.body;
+
+  if (refreshToken) {
+    try {
+      const payload = jwt.verify(refreshToken, REFRESH_SECRET);
+      refreshTokens.delete(payload.jti);
+    } catch {
+      // Already invalid — nothing to revoke.
+    }
+  }
+
+  res.json({ ok: true });
+});
+
+// --- Middleware: verifies the access token from the Authorization header ---
 function authenticateToken(req, res, next) {
   const authHeader = req.headers["authorization"]; // format: "Bearer <token>"
   const token = authHeader && authHeader.split(" ")[1];
@@ -94,16 +167,21 @@ function authenticateToken(req, res, next) {
     return res.status(401).json({ error: "No token provided" });
   }
 
-  jwt.verify(token, SECRET_KEY, (err, decoded) => {
+  jwt.verify(token, ACCESS_SECRET, (err, decoded) => {
     if (err) {
-      return res.status(403).json({ error: "Invalid or expired token" });
+      // The client watches for this exact code to know it should try /refresh.
+      const expired = err.name === "TokenExpiredError";
+      return res.status(401).json({
+        error: expired ? "Access token expired" : "Invalid token",
+        code: expired ? "TOKEN_EXPIRED" : "TOKEN_INVALID",
+      });
     }
     req.user = decoded;
     next();
   });
 }
 
-// --- Middleware: the authorization step — authenticated isn't the same as allowed ---
+// --- Middleware: authenticated isn't the same as allowed ---
 function requireRole(role) {
   return (req, res, next) => {
     if (req.user.role !== role) {
@@ -113,7 +191,7 @@ function requireRole(role) {
   };
 }
 
-// --- PROTECTED route: only accessible with a valid JWT ---
+// --- PROTECTED ---
 app.get("/profile", authenticateToken, (req, res) => {
   res.json({
     message: `Welcome, ${req.user.username}! This is protected data.`,
@@ -122,7 +200,7 @@ app.get("/profile", authenticateToken, (req, res) => {
   });
 });
 
-// --- PER-USER data: the same URL returns different rows depending on the token ---
+// --- PER-USER data: same URL, different rows depending on the token ---
 app.get("/notes", authenticateToken, (req, res) => {
   res.json(notes.filter((n) => n.userId === req.user.userId));
 });
@@ -141,7 +219,7 @@ app.post("/notes", authenticateToken, (req, res) => {
 app.delete("/notes/:id", authenticateToken, (req, res) => {
   const note = notes.find((n) => n.id === Number(req.params.id));
 
-  // Note the ownership check: a valid token for user A must not delete user B's note.
+  // A valid token proves who you are, not what you own.
   if (!note || note.userId !== req.user.userId) {
     return res.status(404).json({ error: "Note not found" });
   }
@@ -150,14 +228,13 @@ app.delete("/notes/:id", authenticateToken, (req, res) => {
   res.json({ deleted: note.id });
 });
 
-// --- ADMIN-ONLY route: a valid token is not enough, the role has to match ---
+// --- ADMIN-ONLY ---
 app.get("/admin/users", authenticateToken, requireRole("admin"), (req, res) => {
   res.json(
     users.map((u) => ({
-      id: u.id,
-      username: u.username,
-      role: u.role,
+      ...publicUser(u),
       noteCount: notes.filter((n) => n.userId === u.id).length,
+      activeSessions: [...refreshTokens.values()].filter((t) => t.userId === u.id && !t.used).length,
     }))
   );
 });
@@ -165,6 +242,7 @@ app.get("/admin/users", authenticateToken, requireRole("admin"), (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`Access tokens last ${ACCESS_TTL}, refresh tokens ${REFRESH_TTL}`);
   console.log(`Log in as testuser / password123  (regular user)`);
   console.log(`Log in as admin    / password123  (admin)`);
 });
