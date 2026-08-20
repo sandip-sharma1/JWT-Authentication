@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>JWT Login Demo</title>
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    max-width: 460px;
+    margin: 60px auto;
+    background: #f5f5f7;
+    color: #1d1d1f;
+  }
+  .card {
+    background: white;
+    padding: 24px;
+    border-radius: 12px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+  }
+  input {
+    width: 100%;
+    padding: 10px;
+    margin: 6px 0 14px;
+    border: 1px solid #d2d2d7;
+    border-radius: 6px;
+    box-sizing: border-box;
+  }
+  button {
+    width: 100%;
+    padding: 10px;
+    background: #0071e3;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 15px;
+  }
+  button:hover { background: #0077ed; }
+  button.secondary { background: #333; margin-top: 8px; }
+  button.secondary:hover { background: #4a4a4a; }
+  .hidden { display: none; }
+  .row { display: flex; gap: 8px; align-items: flex-start; }
+  .row input { margin-bottom: 0; }
+  .row button { width: auto; padding: 10px 16px; }
+  .note {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    border-bottom: 1px solid #ececf0;
+    font-size: 14px;
+  }
+  .note button {
+    width: auto;
+    padding: 4px 10px;
+    font-size: 12px;
+    background: none;
+    color: #d70015;
+  }
+  .note button:hover { background: #ffe9e9; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-size: 12px;
+    background: #ececf0;
+    color: #444;
+    vertical-align: middle;
+  }
+  .badge.admin { background: #fde8c8; color: #8a5a00; }
+  hr { border: none; border-top: 1px solid #ececf0; margin: 20px 0; }
+  h2, h3 { margin-top: 0; }
+  #result, #token {
+    margin-top: 16px;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  #token { color: #86868b; font-size: 11px; }
+  .error { color: #d70015; }
+  .success { color: #1a7f37; }
+</style>
+</head>
+<body>
+
+<!-- ===== Logged-out view ===== -->
+<div class="card" id="authView">
+  <h2 id="authTitle">Log In</h2>
+  <label>Username</label>
+  <input id="username" value="testuser" />
+  <label>Password</label>
+  <input id="password" type="password" value="password123" />
+  <button onclick="submitAuth()" id="authButton">Log In</button>
+  <button class="secondary" onclick="toggleMode()" id="toggleButton">Need an account? Sign up</button>
+  <div id="authResult"></div>
+  <hr />
+  <div style="font-size:13px; color:#86868b;">
+    Try <b>testuser</b> / password123 (regular user) and <b>admin</b> / password123 (admin)
+    — each one sees different things.
+  </div>
+</div>
+
+<!-- ===== Logged-in view ===== -->
+<div class="card hidden" id="appView">
+  <h2>Hi, <span id="whoami"></span> <span class="badge" id="roleBadge"></span></h2>
+
+  <h3>Your notes</h3>
+  <div class="row">
+    <input id="noteText" placeholder="Write a note..." />
+    <button onclick="addNote()">Add</button>
+  </div>
+  <div id="notes"></div>
+
+  <div id="adminSection">
+    <hr />
+    <h3>Admin panel</h3>
+    <button class="secondary" onclick="loadAdminUsers()">List all users (admin only)</button>
+    <div id="adminResult"></div>
+  </div>
+
+  <hr />
+  <button class="secondary" onclick="logout()">Log out</button>
+  <div id="token"></div>
+</div>
+
+<script>
+  // The token lives in localStorage, so a page refresh keeps you logged in.
+  // Real apps usually prefer an httpOnly cookie, which page scripts can't read.
+  let token = localStorage.getItem("token");
+  let isSignup = false;
+
+  // The payload is only base64-encoded, not encrypted — anyone can read it.
+  // We decode it here just to render the UI; the server still verifies the signature.
+  function decodeToken(t) {
+    try {
+      return JSON.parse(atob(t.split(".")[1]));
+    } catch {
+      return null;
+    }
+  }
+
+  function toggleMode() {
+    isSignup = !isSignup;
+    document.getElementById("authTitle").textContent = isSignup ? "Sign Up" : "Log In";
+    document.getElementById("authButton").textContent = isSignup ? "Create Account" : "Log In";
+    document.getElementById("toggleButton").textContent =
+      isSignup ? "Already have an account? Log in" : "Need an account? Sign up";
+    document.getElementById("authResult").textContent = "";
+  }
+
+  async function submitAuth() {
+    const username = document.getElementById("username").value;
+    const password = document.getElementById("password").value;
+    const resultEl = document.getElementById("authResult");
+
+    try {
+      const res = await fetch(isSignup ? "/register" : "/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        resultEl.className = "error";
+        resultEl.textContent = (isSignup ? "Signup" : "Login") + " failed: " + data.error;
+        return;
+      }
+
+      token = data.token;
+      localStorage.setItem("token", token);
+      resultEl.textContent = "";
+      showApp();
+    } catch (err) {
+      resultEl.className = "error";
+      resultEl.textContent = "Request failed: " + err.message;
+    }
+  }
+
+  function logout() {
+    token = null;
+    localStorage.removeItem("token");
+    document.getElementById("appView").classList.add("hidden");
+    document.getElementById("authView").classList.remove("hidden");
+  }
+
+  // Every protected call sends the token; a 401/403 means we're done here.
+  async function api(url, options = {}) {
+    const res = await fetch(url, {
+      ...options,
+      headers: {
+        ...(options.headers || {}),
+        "Authorization": "Bearer " + token
+      }
+    });
+
+    if (res.status === 401 || (res.status === 403 && !url.startsWith("/admin"))) {
+      logout();
+      throw new Error("Session expired — please log in again.");
+    }
+    return res;
+  }
+
+  function showApp() {
+    const payload = decodeToken(token);
+    if (!payload) return logout();
+
+    document.getElementById("authView").classList.add("hidden");
+    document.getElementById("appView").classList.remove("hidden");
+    document.getElementById("whoami").textContent = payload.username;
+
+    const badge = document.getElementById("roleBadge");
+    badge.textContent = payload.role;
+    badge.className = "badge " + (payload.role === "admin" ? "admin" : "");
+
+    // The admin panel is hidden for regular users — but that's only cosmetic.
+    // The real enforcement is requireRole("admin") on the server.
+    document.getElementById("adminSection").style.display =
+      payload.role === "admin" ? "block" : "none";
+    document.getElementById("adminResult").textContent = "";
+    document.getElementById("token").textContent = "JWT: " + token;
+
+    loadNotes();
+  }
+
+  async function loadNotes() {
+    const container = document.getElementById("notes");
+    try {
+      const res = await api("/notes");
+      const notes = await res.json();
+
+      if (notes.length === 0) {
+        container.innerHTML = "<div class='note'>No notes yet.</div>";
+        return;
+      }
+
+      container.innerHTML = "";
+      for (const note of notes) {
+        const el = document.createElement("div");
+        el.className = "note";
+
+        const text = document.createElement("span");
+        text.textContent = note.text;
+
+        const del = document.createElement("button");
+        del.textContent = "Delete";
+        del.onclick = () => deleteNote(note.id);
+
+        el.append(text, del);
+        container.append(el);
+      }
+    } catch (err) {
+      container.textContent = err.message;
+    }
+  }
+
+  async function addNote() {
+    const input = document.getElementById("noteText");
+    if (!input.value.trim()) return;
+
+    await api("/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: input.value.trim() })
+    });
+
+    input.value = "";
+    loadNotes();
+  }
+
+  async function deleteNote(id) {
+    await api("/notes/" + id, { method: "DELETE" });
+    loadNotes();
+  }
+
+  async function loadAdminUsers() {
+    const resultEl = document.getElementById("adminResult");
+    try {
+      const res = await api("/admin/users");
+      const data = await res.json();
+      resultEl.className = res.ok ? "success" : "error";
+      resultEl.textContent = JSON.stringify(data, null, 2);
+    } catch (err) {
+      resultEl.className = "error";
+      resultEl.textContent = err.message;
+    }
+  }
+
+  // Still holding a token from a previous visit? Go straight to the app.
+  if (token) showApp();
+</script>
+
+</body>
+</html>
