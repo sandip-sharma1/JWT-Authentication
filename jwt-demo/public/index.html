@@ -223,8 +223,8 @@
   <div id="authResult" class="msg"></div>
 
   <div class="hint">
-    <b>testuser</b> / password123 — regular user<br />
-    <b>admin</b> / password123 — admin, sees an extra panel
+    <b>testuser</b> / password123 (regular user)<br />
+    <b>admin</b> / password123 (admin, gets an extra panel)
   </div>
 </div>
 
@@ -260,8 +260,8 @@
   <div class="panel hidden" id="panel-sessions">
     <h2>Active sessions</h2>
     <p class="sub" style="margin-bottom:16px">
-      Every login creates a refresh token the server tracks — so you can see your
-      devices and sign any of them out. Stateless access tokens alone can't do this.
+      Every login creates a refresh token the server keeps track of, so you can see
+      your devices and sign any of them out.
     </p>
     <div id="sessionList"></div>
     <button class="ghost" style="margin-top:6px" onclick="revokeAll()">Sign out all other devices</button>
@@ -313,8 +313,8 @@
 </div>
 
 <script>
-  // Two tokens now. The access token is short-lived and sent on every request;
-  // the refresh token is long-lived and only ever sent to /refresh.
+  // Access token is short lived and goes out with every request. Refresh token is
+  // long lived and only ever gets sent to /refresh.
   let accessToken = localStorage.getItem("accessToken");
   let refreshToken = localStorage.getItem("refreshToken");
   let isSignup = false;
@@ -333,15 +333,15 @@
     localStorage.removeItem("refreshToken");
   }
 
-  // A JWT payload is base64url, not encrypted — anyone holding the token can read it.
-  // We decode it here only to draw the UI; the server still verifies the signature.
+  // The payload is just base64url, not encrypted, so anyone holding the token can
+  // read it. Only used here for display. The server does the real verification.
   function decode(t) {
     try {
       return JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
     } catch { return null; }
   }
 
-  /* ============ small helpers ============ */
+  // --- helpers ---
   function tab(name) {
     for (const el of document.querySelectorAll(".panel")) el.classList.add("hidden");
     for (const el of document.querySelectorAll(".tabs button")) el.classList.remove("on");
@@ -369,8 +369,8 @@
     return Math.floor(s / 86400) + "d ago";
   }
 
-  // Rough strength hint. Real apps should check against known-breached password
-  // lists (k-anonymity via haveibeenpwned) — length alone is a weak signal.
+  // Very rough strength hint. Length and character classes only, which isn't much
+  // of a signal. Checking against breached password lists would be better.
   function meter(v) {
     const score = Math.min(4, (v.length >= 8) + (v.length >= 12) + /[A-Z]/.test(v) + /[0-9!@#$%^&*]/.test(v));
     const bar = document.getElementById("pwMeter");
@@ -380,15 +380,15 @@
 
   function log(msg) {
     document.getElementById("log").textContent =
-      new Date().toLocaleTimeString() + " — " + msg;
+      new Date().toLocaleTimeString() + "  " + msg;
   }
 
-  /* ============ auth screen ============ */
+  // --- login / signup ---
   function toggleMode() {
     isSignup = !isSignup;
     document.getElementById("authTitle").textContent = isSignup ? "Create account" : "Welcome back";
     document.getElementById("authSub").textContent = isSignup
-      ? "Pick any username — it becomes a real account."
+      ? "Pick any username, it becomes a real account."
       : "Log in to see your private data.";
     document.getElementById("authButton").textContent = isSignup ? "Sign Up" : "Log In";
     document.getElementById("toggleButton").textContent =
@@ -425,8 +425,8 @@
   }
 
   async function logout() {
-    // Tell the server to revoke the refresh token — this is the part that
-    // stateless access tokens alone can't give you.
+    // Revoke the refresh token server side. This is the bit a plain stateless
+    // token setup can't do.
     try {
       await fetch("/logout", {
         method: "POST",
@@ -441,7 +441,7 @@
     document.getElementById("authView").classList.remove("hidden");
   }
 
-  /* ============ the refresh dance ============ */
+  // --- refresh ---
   async function doRefresh() {
     const res = await fetch("/refresh", {
       method: "POST",
@@ -449,14 +449,14 @@
       body: JSON.stringify({ refreshToken }),
     });
 
-    if (!res.ok) return false;      // refresh token dead too — real logout
+    if (!res.ok) return false; // refresh token is gone too, so it's a real logout
     saveTokens(await res.json());
     renderToken();
     return true;
   }
 
-  // Every protected call goes through here. On an expired access token it
-  // silently refreshes and retries once, so the user never notices.
+  // Everything protected goes through here. If the access token expired, refresh
+  // and retry once so the user doesn't notice.
   async function api(url, options = {}, isRetry = false) {
     const res = await fetch(url, {
       ...options,
@@ -472,7 +472,7 @@
           return api(url, options, true);
         }
       }
-      log("session over — logging out");
+      log("session is over, logging out");
       await logout();
       throw new Error("Session expired. Please log in again.");
     }
@@ -481,13 +481,13 @@
 
   async function manualRefresh() {
     log("rotating tokens…");
-    log((await doRefresh()) ? "rotated — brand new access + refresh token" : "refresh token rejected");
+    log((await doRefresh()) ? "rotated, new access + refresh token" : "refresh token rejected");
   }
 
-  // Throw away the access token to prove the auto-refresh works on the next call.
+  // Deliberately break the access token to watch the retry happen.
   function breakToken() {
     accessToken = "x.y.z";
-    log("access token trashed — the next request should recover on its own");
+    log("access token trashed, the next request should recover on its own");
   }
 
   async function callProfile() {
@@ -497,7 +497,7 @@
     } catch (err) { log(err.message); }
   }
 
-  /* ============ logged-in view ============ */
+  // --- logged in view ---
   function showApp() {
     const p = decode(accessToken);
     if (!p) return logout();
@@ -513,7 +513,7 @@
     badge.textContent = p.role;
     badge.className = "badge" + (p.role === "admin" ? " admin" : "");
 
-    // Hiding the panel is cosmetic. requireRole("admin") on the server is the real gate.
+    // Hiding this is cosmetic only. requireRole("admin") on the server is the real check.
     document.getElementById("adminSection").classList.toggle("hidden", p.role !== "admin");
     document.getElementById("adminResult").classList.add("hidden");
 
@@ -552,13 +552,13 @@
     bar.style.background = left === 0 ? "var(--danger)" : left < 30 ? "#e8a13a" : "var(--accent)";
   }
 
-  /* ============ notes ============ */
+  // --- notes ---
   async function loadNotes() {
     const box = document.getElementById("notes");
     try {
       const notes = await (await api("/notes")).json();
       if (!notes.length) {
-        box.innerHTML = "<div class='empty'>No notes yet — add one above.</div>";
+        box.innerHTML = "<div class='empty'>No notes yet, add one above.</div>";
         return;
       }
 
@@ -600,7 +600,7 @@
     } catch (err) { log(err.message); }
   }
 
-  /* ============ sessions ============ */
+  // --- sessions ---
   async function loadSessions() {
     const box = document.getElementById("sessionList");
     try {
@@ -659,8 +659,7 @@
 
   async function revokeAll() {
     try {
-      // The server hands back a fresh pair, so THIS tab stays logged in
-      // while every other device is signed out.
+      // Server sends back a new pair so this tab survives while the others don't.
       const res = await api("/sessions/revoke-all", { method: "POST" });
       const data = await res.json();
       saveTokens(data);
@@ -670,7 +669,7 @@
     } catch (err) { toast(err.message, true); }
   }
 
-  /* ============ change password ============ */
+  // --- change password ---
   async function changePassword() {
     const currentPassword = document.getElementById("curPw").value;
     const newPassword = document.getElementById("newPw").value;
@@ -685,7 +684,7 @@
 
       if (!res.ok) return toast(data.error, true);
 
-      saveTokens(data);   // old sessions died, including our own — use the new pair
+      saveTokens(data); // our own session died too, so use the new pair
       renderToken();
       document.getElementById("curPw").value = "";
       document.getElementById("newPw").value = "";
@@ -703,7 +702,7 @@
     } catch (err) { out.textContent = err.message; }
   }
 
-  // Returning visitor with tokens still in localStorage? Go straight in.
+  // Tokens still in localStorage from last time, so skip the login screen.
   if (accessToken && refreshToken) showApp();
 </script>
 </body>

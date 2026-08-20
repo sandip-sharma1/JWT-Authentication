@@ -9,22 +9,21 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-// Two different secrets: a leaked access secret must not let anyone mint refresh tokens.
+// Separate secrets so a leaked access secret can't be used to mint refresh tokens.
 const ACCESS_SECRET = process.env.ACCESS_SECRET || "dev_access_secret_change_me";
 const REFRESH_SECRET = process.env.REFRESH_SECRET || "dev_refresh_secret_change_me";
 
 if (!process.env.ACCESS_SECRET) {
-  console.warn("⚠  Using the built-in dev secrets. Set ACCESS_SECRET and REFRESH_SECRET in production —");
-  console.warn("   anyone who reads this source file can forge tokens otherwise.");
+  console.warn("Warning: using the dev secrets from this file. Set ACCESS_SECRET and");
+  console.warn("REFRESH_SECRET before running this anywhere real.");
 }
 
-// Short access token, long refresh token. The access token is sent on every
-// request (more exposure) so it expires fast; the refresh token is only ever
-// sent to /refresh (less exposure) so it can live longer.
+// The access token goes out with every request so it expires fast. The refresh
+// token only ever goes to /refresh, so it can safely live much longer.
 const ACCESS_TTL = "2m";
 const REFRESH_TTL = "7d";
 
-// --- Seed two demo accounts on first run ---
+// Seed two accounts the first time this runs.
 if (db.users.length === 0) {
   db.users.push(
     { id: 1, username: "testuser", role: "user", passwordHash: bcrypt.hashSync("password123", 8), createdAt: Date.now() },
@@ -39,17 +38,15 @@ if (db.users.length === 0) {
   save();
 }
 
-/* ============================================================
-   Rate limiting — brute-force protection
-   Without this, nothing stops thousands of password guesses per second.
-   ============================================================ */
+// Rate limiting. Without it you can guess passwords as fast as you can send
+// requests, which makes the bcrypt hashing fairly pointless.
 const attempts = new Map(); // key -> { count, firstAt, lockedUntil }
 const MAX_ATTEMPTS = 5;
 const WINDOW_MS = 15 * 60 * 1000;
 const LOCKOUT_MS = 5 * 60 * 1000;
 
 function rateLimit(req, res, next) {
-  // Key on IP + username so one attacker can't lock out an innocent user globally.
+  // Keyed on IP + username, otherwise one attacker could lock everyone out.
   const key = req.ip + ":" + (req.body.username || "");
   const now = Date.now();
   const entry = attempts.get(key);
@@ -73,12 +70,9 @@ function recordFailure(key) {
   return Math.max(0, MAX_ATTEMPTS - entry.count);
 }
 
-/* ============================================================
-   Tokens & sessions
-   Access tokens are stateless (which is why they can't be revoked), but
-   refresh tokens are tracked in the DB — that's what makes real logout,
-   session listing, and revocation possible.
-   ============================================================ */
+// Access tokens are stateless, which is exactly why they can't be revoked.
+// Refresh tokens get a row in db.sessions, and that's what makes logout,
+// the sessions list and "sign out everywhere" possible.
 function issueTokens(user, req, family = crypto.randomUUID()) {
   const accessToken = jwt.sign(
     { userId: user.id, username: user.username, role: user.role },
@@ -86,7 +80,7 @@ function issueTokens(user, req, family = crypto.randomUUID()) {
     { expiresIn: ACCESS_TTL }
   );
 
-  const jti = crypto.randomUUID(); // unique id, so this token can be revoked later
+  const jti = crypto.randomUUID(); // id for this token so we can revoke it later
   const refreshToken = jwt.sign({ userId: user.id, jti, family }, REFRESH_SECRET, {
     expiresIn: REFRESH_TTL,
   });
@@ -114,9 +108,7 @@ function revokeFamily(family) {
   save();
 }
 
-/* ============================================================
-   Auth routes
-   ============================================================ */
+// --- auth routes ---
 app.post("/register", rateLimit, (req, res) => {
   const { username, password } = req.body;
 
@@ -150,7 +142,7 @@ app.post("/login", rateLimit, (req, res) => {
   const { username, password } = req.body;
   const user = db.users.find((u) => u.username === username);
 
-  // Same generic message either way, so nobody can enumerate valid usernames.
+  // Same message for both cases, otherwise you could probe for valid usernames.
   if (!user || !bcrypt.compareSync(password, user.passwordHash)) {
     const left = recordFailure(req.rateKey);
     return res.status(401).json({
@@ -159,7 +151,7 @@ app.post("/login", rateLimit, (req, res) => {
     });
   }
 
-  attempts.delete(req.rateKey); // successful login clears the counter
+  attempts.delete(req.rateKey); // clear the failure count
   res.json({ ...issueTokens(user, req), user: publicUser(user) });
 });
 
@@ -177,17 +169,17 @@ app.post("/refresh", (req, res) => {
   const session = db.sessions.find((s) => s.jti === payload.jti);
   if (!session) return res.status(403).json({ error: "Session has been revoked" });
 
-  // Reuse detection: a rotated token should never come back. If it does, it was
-  // probably stolen — so every token in that family dies at once.
+  // A rotated token should never show up again. If it does, assume it was stolen
+  // and drop the whole family.
   if (session.used) {
     revokeFamily(session.family);
-    return res.status(403).json({ error: "Refresh token reuse detected — all sessions revoked" });
+    return res.status(403).json({ error: "Refresh token reuse detected, all sessions revoked" });
   }
 
   const user = db.users.find((u) => u.id === payload.userId);
   if (!user) return res.status(403).json({ error: "User no longer exists" });
 
-  // Rotation: each refresh burns the old token and issues a fresh one.
+  // Rotate: burn the old one, issue a new one.
   db.sessions = db.sessions.filter((s) => s.jti !== session.jti);
   save();
 
@@ -202,15 +194,13 @@ app.post("/logout", (req, res) => {
       db.sessions = db.sessions.filter((s) => s.jti !== payload.jti);
       save();
     } catch {
-      // Already invalid — nothing to revoke.
+      // already invalid, nothing to revoke
     }
   }
   res.json({ ok: true });
 });
 
-/* ============================================================
-   Middleware
-   ============================================================ */
+// --- middleware ---
 function authenticateToken(req, res, next) {
   const authHeader = req.headers["authorization"]; // "Bearer <token>"
   const token = authHeader && authHeader.split(" ")[1];
@@ -218,7 +208,7 @@ function authenticateToken(req, res, next) {
 
   jwt.verify(token, ACCESS_SECRET, (err, decoded) => {
     if (err) {
-      // The client watches for this code to know it should try /refresh.
+      // The frontend looks for this code to decide whether to hit /refresh.
       const expired = err.name === "TokenExpiredError";
       return res.status(401).json({
         error: expired ? "Access token expired" : "Invalid token",
@@ -239,9 +229,7 @@ function requireRole(role) {
   };
 }
 
-/* ============================================================
-   Account
-   ============================================================ */
+// --- account ---
 app.get("/profile", authenticateToken, (req, res) => {
   const user = db.users.find((u) => u.id === req.user.userId);
   if (!user) return res.status(404).json({ error: "User not found" });
@@ -253,8 +241,8 @@ app.get("/profile", authenticateToken, (req, res) => {
   });
 });
 
-// Changing a password kills every other session — standard practice, because
-// the usual reason to change it is that you think someone else has it.
+// Changing the password drops every session. If you're changing it, you probably
+// think someone else has it.
 app.post("/change-password", authenticateToken, (req, res) => {
   const { currentPassword, newPassword } = req.body;
   const user = db.users.find((u) => u.id === req.user.userId);
@@ -270,12 +258,10 @@ app.post("/change-password", authenticateToken, (req, res) => {
   db.sessions = db.sessions.filter((s) => s.userId !== user.id);
   save();
 
-  res.json({ ...issueTokens(user, req), user: publicUser(user), message: "Password changed — other sessions signed out" });
+  res.json({ ...issueTokens(user, req), user: publicUser(user), message: "Password changed, other sessions signed out" });
 });
 
-/* ============================================================
-   Sessions — the payoff of tracking refresh tokens
-   ============================================================ */
+// --- sessions ---
 app.get("/sessions", authenticateToken, (req, res) => {
   res.json(
     db.sessions
@@ -292,7 +278,7 @@ app.get("/sessions", authenticateToken, (req, res) => {
 app.delete("/sessions/:id", authenticateToken, (req, res) => {
   const session = db.sessions.find((s) => s.jti === req.params.id);
 
-  // Ownership check: you may only revoke your own sessions.
+  // you can only revoke your own
   if (!session || session.userId !== req.user.userId) {
     return res.status(404).json({ error: "Session not found" });
   }
@@ -311,9 +297,7 @@ app.post("/sessions/revoke-all", authenticateToken, (req, res) => {
   res.json({ ...issueTokens(user, req), revoked: before - db.sessions.length });
 });
 
-/* ============================================================
-   Notes — per-user data
-   ============================================================ */
+// --- notes ---
 app.get("/notes", authenticateToken, (req, res) => {
   res.json(db.notes.filter((n) => n.userId === req.user.userId));
 });
@@ -346,7 +330,7 @@ app.put("/notes/:id", authenticateToken, (req, res) => {
 app.delete("/notes/:id", authenticateToken, (req, res) => {
   const note = db.notes.find((n) => n.id === Number(req.params.id));
 
-  // A valid token proves who you are, not what you own.
+  // Having a valid token doesn't mean you own this note.
   if (!note || note.userId !== req.user.userId) {
     return res.status(404).json({ error: "Note not found" });
   }
@@ -356,9 +340,7 @@ app.delete("/notes/:id", authenticateToken, (req, res) => {
   res.json({ deleted: note.id });
 });
 
-/* ============================================================
-   Admin
-   ============================================================ */
+// --- admin ---
 app.get("/admin/users", authenticateToken, requireRole("admin"), (req, res) => {
   res.json(
     db.users.map((u) => ({

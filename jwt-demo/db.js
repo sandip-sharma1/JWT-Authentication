@@ -1,8 +1,6 @@
-// A tiny JSON-file "database".
-//
-// Not what you'd use in production (no concurrency control, rewrites the whole
-// file on every change), but it makes accounts and sessions survive a restart
-// without pulling in a native dependency.
+// Stores everything in a JSON file. Rewrites the whole thing on every change and
+// has no locking, so it would fall over under any real load, but it keeps accounts
+// and sessions around between restarts without adding a database dependency.
 const fs = require("fs");
 const path = require("path");
 
@@ -14,14 +12,14 @@ function load() {
   try {
     return { ...EMPTY, ...JSON.parse(fs.readFileSync(FILE, "utf8")) };
   } catch {
-    return { ...EMPTY }; // first run, or the file got corrupted
+    return { ...EMPTY }; // first run, or the file is unreadable
   }
 }
 
 const db = load();
 
-// Write to a temp file then rename: a crash mid-write can't leave a half-written
-// data.json behind, because rename is atomic on POSIX.
+// Write to a temp file and rename, so a crash halfway through can't leave a
+// truncated data.json behind.
 function save() {
   const tmp = FILE + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
