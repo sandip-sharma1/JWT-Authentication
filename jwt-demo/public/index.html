@@ -169,6 +169,38 @@
   .success { color: var(--success); }
   .hint { font-size: 13px; color: var(--muted); margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--border); }
   .log { font-size: 12px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; margin-top: 10px; }
+
+  /* ===== Tabs ===== */
+  .tabs { display: flex; gap: 4px; margin-bottom: 20px; background: #f0f0f3; padding: 4px; border-radius: 10px; }
+  .tabs button {
+    flex: 1; background: none; color: var(--muted); font-size: 14px;
+    padding: 8px; border-radius: 7px; font-weight: 500;
+  }
+  .tabs button:hover { background: rgba(0,0,0,0.03); color: var(--text); }
+  .tabs button.on { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+
+  /* ===== Sessions ===== */
+  .session {
+    display: flex; align-items: center; gap: 12px;
+    padding: 13px 15px; margin-bottom: 8px;
+    border: 1px solid var(--border); border-radius: 10px; font-size: 14px;
+  }
+  .session.current { border-color: var(--accent); background: #f5faff; }
+  .session .info { flex: 1; min-width: 0; }
+  .session .dev { font-weight: 500; }
+  .session .when { font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); flex: none; }
+
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: #1d1d1f; color: #fff; padding: 12px 20px; border-radius: 10px;
+    font-size: 14px; box-shadow: var(--shadow); z-index: 50;
+    animation: rise .2s ease-out;
+  }
+  .toast.bad { background: var(--danger); }
+  @keyframes rise { from { opacity: 0; transform: translate(-50%, 8px); } }
+  .meterbar { height: 4px; background: var(--border); border-radius: 4px; overflow: hidden; margin: -8px 0 16px; }
+  .meterbar i { display: block; height: 100%; width: 0; transition: width .2s, background .2s; }
 </style>
 </head>
 <body>
@@ -207,12 +239,48 @@
     <button class="ghost" onclick="logout()">Log out</button>
   </div>
 
+  <div class="tabs">
+    <button class="on" onclick="tab('notes')" id="tab-notes">Notes</button>
+    <button onclick="tab('sessions')" id="tab-sessions">Sessions</button>
+    <button onclick="tab('account')" id="tab-account">Account</button>
+    <button onclick="tab('token')" id="tab-token">Token</button>
+  </div>
+
+  <!-- ===== Notes ===== -->
+  <div class="panel" id="panel-notes">
   <h2>Your notes</h2>
   <div class="row">
     <input id="noteText" placeholder="Write something private..." onkeydown="if(event.key==='Enter')addNote()" />
     <button onclick="addNote()">Add</button>
   </div>
   <div id="notes"></div>
+  </div>
+
+  <!-- ===== Sessions ===== -->
+  <div class="panel hidden" id="panel-sessions">
+    <h2>Active sessions</h2>
+    <p class="sub" style="margin-bottom:16px">
+      Every login creates a refresh token the server tracks — so you can see your
+      devices and sign any of them out. Stateless access tokens alone can't do this.
+    </p>
+    <div id="sessionList"></div>
+    <button class="ghost" style="margin-top:6px" onclick="revokeAll()">Sign out all other devices</button>
+  </div>
+
+  <!-- ===== Account ===== -->
+  <div class="panel hidden" id="panel-account">
+    <h2>Change password</h2>
+    <label>Current password</label>
+    <input id="curPw" type="password" autocomplete="current-password" />
+    <label>New password</label>
+    <input id="newPw" type="password" autocomplete="new-password" oninput="meter(this.value)" />
+    <div class="meterbar"><i id="pwMeter"></i></div>
+    <button class="block" onclick="changePassword()">Update password</button>
+    <p class="hint" style="border:none; padding-top:14px; margin-top:6px">
+      Changing your password signs out every other session, since the usual reason
+      to change it is that someone else may know it.
+    </p>
+  </div>
 
   <!-- Admin only -->
   <div class="section hidden" id="adminSection">
@@ -222,7 +290,7 @@
   </div>
 
   <!-- Token inspector -->
-  <div class="section">
+  <div class="panel hidden" id="panel-token">
     <h2>Access token</h2>
     <div class="timer">
       <span style="color:var(--muted)">Expires in</span>
@@ -271,6 +339,43 @@
     try {
       return JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
     } catch { return null; }
+  }
+
+  /* ============ small helpers ============ */
+  function tab(name) {
+    for (const el of document.querySelectorAll(".panel")) el.classList.add("hidden");
+    for (const el of document.querySelectorAll(".tabs button")) el.classList.remove("on");
+    document.getElementById("panel-" + name).classList.remove("hidden");
+    document.getElementById("tab-" + name).classList.add("on");
+    if (name === "sessions") loadSessions();
+  }
+
+  let toastTimer = null;
+  function toast(msg, bad = false) {
+    document.querySelector(".toast")?.remove();
+    const el = document.createElement("div");
+    el.className = "toast" + (bad ? " bad" : "");
+    el.textContent = msg;
+    document.body.append(el);
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.remove(), 2600);
+  }
+
+  function ago(ts) {
+    const s = Math.floor((Date.now() - ts) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+
+  // Rough strength hint. Real apps should check against known-breached password
+  // lists (k-anonymity via haveibeenpwned) — length alone is a weak signal.
+  function meter(v) {
+    const score = Math.min(4, (v.length >= 8) + (v.length >= 12) + /[A-Z]/.test(v) + /[0-9!@#$%^&*]/.test(v));
+    const bar = document.getElementById("pwMeter");
+    bar.style.width = (score / 4) * 100 + "%";
+    bar.style.background = score < 2 ? "var(--danger)" : score < 4 ? "#e8a13a" : "var(--success)";
   }
 
   function log(msg) {
@@ -493,6 +598,100 @@
       await api("/notes/" + id, { method: "DELETE" });
       loadNotes();
     } catch (err) { log(err.message); }
+  }
+
+  /* ============ sessions ============ */
+  async function loadSessions() {
+    const box = document.getElementById("sessionList");
+    try {
+      const sessions = await (await api("/sessions")).json();
+      if (!sessions.length) {
+        box.innerHTML = "<div class='empty'>No active sessions.</div>";
+        return;
+      }
+
+      box.innerHTML = "";
+      for (const s of sessions) {
+        const el = document.createElement("div");
+        el.className = "session";
+
+        const dot = document.createElement("div");
+        dot.className = "dot";
+
+        const info = document.createElement("div");
+        info.className = "info";
+        const dev = document.createElement("div");
+        dev.className = "dev";
+        dev.textContent = shortUA(s.userAgent);
+        const when = document.createElement("div");
+        when.className = "when";
+        when.textContent = "Started " + ago(s.createdAt) + " · " + s.ip;
+        info.append(dev, when);
+
+        const btn = document.createElement("button");
+        btn.className = "ghost tiny";
+        btn.textContent = "Revoke";
+        btn.onclick = () => revokeSession(s.id);
+
+        el.append(dot, info, btn);
+        box.append(el);
+      }
+    } catch (err) {
+      box.innerHTML = "<div class='empty'>" + err.message + "</div>";
+    }
+  }
+
+  function shortUA(ua) {
+    if (/Chrome/.test(ua) && !/Edg/.test(ua)) return "Chrome";
+    if (/Safari/.test(ua) && !/Chrome/.test(ua)) return "Safari";
+    if (/Firefox/.test(ua)) return "Firefox";
+    if (/curl/.test(ua)) return "curl (terminal)";
+    return ua.slice(0, 40) || "Unknown device";
+  }
+
+  async function revokeSession(id) {
+    try {
+      await api("/sessions/" + id, { method: "DELETE" });
+      toast("Session revoked");
+      loadSessions();
+    } catch (err) { toast(err.message, true); }
+  }
+
+  async function revokeAll() {
+    try {
+      // The server hands back a fresh pair, so THIS tab stays logged in
+      // while every other device is signed out.
+      const res = await api("/sessions/revoke-all", { method: "POST" });
+      const data = await res.json();
+      saveTokens(data);
+      renderToken();
+      toast("Signed out " + data.revoked + " session(s)");
+      loadSessions();
+    } catch (err) { toast(err.message, true); }
+  }
+
+  /* ============ change password ============ */
+  async function changePassword() {
+    const currentPassword = document.getElementById("curPw").value;
+    const newPassword = document.getElementById("newPw").value;
+
+    try {
+      const res = await api("/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) return toast(data.error, true);
+
+      saveTokens(data);   // old sessions died, including our own — use the new pair
+      renderToken();
+      document.getElementById("curPw").value = "";
+      document.getElementById("newPw").value = "";
+      meter("");
+      toast(data.message);
+    } catch (err) { toast(err.message, true); }
   }
 
   async function loadAdminUsers() {
